@@ -1,0 +1,15 @@
+[
+  {
+    "id": "eth:eth-updown-5m-1782758700:buy:YES:1782758789675:0.41:5.09",
+    "timestamp": "2026-06-29 18:46:29",
+    "timestamp_ms": 1782758789675,
+    "asset": "ETH",
+    "market": "Ethereum Up or Down - June 29, 2:45PM-2:50PM ET",
+    "slug": "eth-updown-5m-1782758700",
+    "action": "buy",
+    "side": "YES",
+    "price": 0.41,
+    "size": 5.09,
+    "window": "5m"
+  }
+]
