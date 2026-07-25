@@ -17,8 +17,6 @@
   },
   "workers": [
     { "asset": "btc", "window": "5m", "enabled": true },
-    { "asset": "eth", "window": "5m", "enabled": true },
-    { "asset": "sol", "window": "5m", "enabled": true },
-    { "asset": "xrp", "window": "5m", "enabled": true }
+    { "asset": "eth", "window": "5m", "enabled": true }
   ]
 }
