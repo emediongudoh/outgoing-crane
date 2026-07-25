@@ -169,7 +169,7 @@ class WorkerConfig:
     dry_run_fill_delay_max_ms: int = 2500
     listener_activate_secs: int = 300
     entry_seconds_left: int = 300
-    min_entry_seconds_left: int = 45
+    min_entry_seconds_left: int = 0
     fill_timeout_ms: int = 10000
     fill_poll_ms: int = 400
     enabled: bool = True
@@ -324,7 +324,7 @@ def _merge_worker_entry(raw: dict, defaults: dict) -> WorkerConfig:
     )
     fill_poll_raw = _cfg_get(raw, defaults, "fill_poll_ms", "spread_fill_poll_ms")
 
-    min_entry_secs = int(min_entry_raw if min_entry_raw is not None else 45)
+    min_entry_secs = int(min_entry_raw if min_entry_raw is not None else 0)
     fill_timeout_ms = _parse_cooldown_ms(
         "fill_timeout_ms",
         fill_timeout_raw,
