@@ -16,6 +16,9 @@
     "fill_poll_ms": 400
   },
   "workers": [
-    { "asset": "eth", "window": "5m", "enabled": true }
+    { "asset": "btc", "window": "5m", "enabled": true },
+    { "asset": "eth", "window": "5m", "enabled": true },
+    { "asset": "sol", "window": "5m", "enabled": true },
+    { "asset": "xrp", "window": "5m", "enabled": true }
   ]
 }
