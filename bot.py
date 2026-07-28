@@ -1097,30 +1097,51 @@ def _parse_ts(ts_str: str) -> Optional[int]:
         return None
 
 
-def _load_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
-    """
-    Return the full trade list for one worker from Redis (primary) or local JSON.
-    Falls back to legacy per-asset keys when window-scoped data is absent.
-    """
-    redis_key = f"emiliano:{asset.lower()}:{window.lower()}:trades"
-    if _redis_available:
-        trades = redis_get_json(redis_key)
-        if trades and isinstance(trades, list) and len(trades) > 0:
-            return trades
-        legacy = redis_get_json(f"emiliano:{asset.lower()}:trades")
-        if legacy and isinstance(legacy, list) and len(legacy) > 0:
-            return legacy
+# Max closed-trade records kept per worker in Redis. Local JSON files are uncapped.
+# ~200 B/trade → 10 000 trades ≈ 2 MB/key — fine for Redis; raise via env if needed.
+REDIS_TRADES_MAX: int = max(int(os.getenv("REDIS_TRADES_MAX", "10000")), 500)
 
+
+def _trade_dedup_key(trade: Dict) -> Tuple[str, str, float]:
+    """Identity for merge/dedup: (timestamp, slug, pnl)."""
+    ts = str(trade.get("timestamp") or "")
+    slug = str(trade.get("slug") or "")
+    pnl_raw = trade.get("pnl")
+    pnl = round(float(pnl_raw), 4) if _is_finite_number(pnl_raw) else 0.0
+    return (ts, slug, pnl)
+
+
+def _merge_trade_lists(*sources: List[Dict]) -> List[Dict]:
+    """Merge trade lists from multiple stores, dedupe, sort oldest-first."""
+    merged: Dict[Tuple[str, str, float], Dict] = {}
+    for trades in sources:
+        if not trades:
+            continue
+        for trade in trades:
+            if not isinstance(trade, dict):
+                continue
+            merged[_trade_dedup_key(trade)] = trade
+
+    def _sort_key(tr: Dict) -> int:
+        ts_ms = _parse_ts(tr.get("timestamp", ""))
+        return ts_ms if ts_ms is not None else 0
+
+    return sorted(merged.values(), key=_sort_key)
+
+
+def _load_local_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
+    """Uncapped trade history from local PnL JSON files."""
+    out: List[Dict] = []
     fp = asset_pnl_filename(asset, window)
     try:
         if os.path.exists(fp):
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
             trades = data.get("trades", [])
-            if trades:
-                return trades
+            if isinstance(trades, list):
+                out.extend(trades)
     except Exception as e:
-        print(f"⚠️ [backfill] Could not read {fp}: {e}")
+        print(f"⚠️ Could not read {fp}: {e}")
 
     legacy_fp = f"{asset.lower()}_pnl_history.json"
     try:
@@ -1128,11 +1149,58 @@ def _load_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
             with open(legacy_fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
             trades = data.get("trades", [])
-            if trades:
-                return trades
+            if isinstance(trades, list):
+                out.extend(trades)
     except Exception as e:
-        print(f"⚠️ [backfill] Could not read {legacy_fp}: {e}")
+        print(f"⚠️ Could not read {legacy_fp}: {e}")
+    return out
+
+
+def _load_redis_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
+    """Trade history from Redis (may be shorter than local if previously truncated)."""
+    if not _redis_available:
+        return []
+    redis_key = f"emiliano:{asset.lower()}:{window.lower()}:trades"
+    trades = redis_get_json(redis_key)
+    if trades and isinstance(trades, list):
+        return trades
+    legacy = redis_get_json(f"emiliano:{asset.lower()}:trades")
+    if legacy and isinstance(legacy, list):
+        return legacy
     return []
+
+
+def _load_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
+    """
+    Return the fullest trade list for one worker.
+
+    Merges uncapped local PnL files with Redis and dedupes by
+    (timestamp, slug, pnl). Local files win on duplicates because they
+    are merged last.
+    """
+    redis_trades = _load_redis_trades_for_asset(asset, window)
+    local_trades = _load_local_trades_for_asset(asset, window)
+    return _merge_trade_lists(redis_trades, local_trades)
+
+
+def _iter_realized_trades(
+    tz_name: Optional[str] = None,
+) -> List[Tuple[Dict, float, int, datetime]]:
+    """All closed trades across workers: (trade, pnl, ts_ms, dt_in_tz)."""
+    tz = resolve_timezone(tz_name or _TRADING_TZ_NAME)
+    rows: List[Tuple[Dict, float, int, datetime]] = []
+    for wc in WORKER_CONFIGS:
+        for trade in _load_trades_for_asset(wc.asset, wc.window):
+            pnl_raw = trade.get("pnl")
+            if pnl_raw is None or not _is_finite_number(pnl_raw):
+                continue
+            pnl = round(float(pnl_raw), 4)
+            ts_ms = _parse_ts(trade.get("timestamp", ""))
+            if ts_ms is None:
+                continue
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(tz)
+            rows.append((trade, pnl, ts_ms, dt))
+    return rows
 
 
 def compute_biggest_realized_win() -> float:
@@ -1168,7 +1236,6 @@ def compute_daily_pnl_calendar(
     if week_start not in (0, 1):
         raise ValueError("week_start must be 0 (Sunday) or 1 (Monday)")
 
-    tz = resolve_timezone(tz_name or _TRADING_TZ_NAME)
     effective_tz_name = tz_name or _TRADING_TZ_NAME
 
     if scale_max is None or scale_max <= 0:
@@ -1189,34 +1256,23 @@ def compute_daily_pnl_calendar(
             }
         return buckets[day_key]
 
-    for wc in WORKER_CONFIGS:
-        for trade in _load_trades_for_asset(wc.asset, wc.window):
-            pnl_raw = trade.get("pnl")
-            if pnl_raw is None or not _is_finite_number(pnl_raw):
-                continue
-            pnl = round(float(pnl_raw), 4)
+    for _trade, pnl, ts_ms, dt in _iter_realized_trades(effective_tz_name):
+        if dt.year != year or dt.month != month:
+            continue
 
-            ts_ms = _parse_ts(trade.get("timestamp", ""))
-            if ts_ms is None:
-                continue
+        day_key = dt.strftime("%Y-%m-%d")
+        b = _bucket(day_key)
+        b["pnl"] = round(b["pnl"] + pnl, 4)
+        b["trades"] += 1
+        if pnl > 0:
+            b["wins"] += 1
+        elif pnl < 0:
+            b["losses"] += 1
 
-            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(tz)
-            if dt.year != year or dt.month != month:
-                continue
-
-            day_key = dt.strftime("%Y-%m-%d")
-            b = _bucket(day_key)
-            b["pnl"] = round(b["pnl"] + pnl, 4)
-            b["trades"] += 1
-            if pnl > 0:
-                b["wins"] += 1
-            elif pnl < 0:
-                b["losses"] += 1
-
-            if b["best_trade"] is None or pnl > b["best_trade"]:
-                b["best_trade"] = pnl
-            if b["worst_trade"] is None or pnl < b["worst_trade"]:
-                b["worst_trade"] = pnl
+        if b["best_trade"] is None or pnl > b["best_trade"]:
+            b["best_trade"] = pnl
+        if b["worst_trade"] is None or pnl < b["worst_trade"]:
+            b["worst_trade"] = pnl
 
     total_pnl = 0.0
     total_trades = 0
@@ -1244,6 +1300,75 @@ def compute_daily_pnl_calendar(
             "win_rate": win_rate,
         },
         "days": buckets,
+    }
+
+
+def compute_pnl_periods(*, tz_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Calendar-aligned and trailing-window realized PnL sums for chart headlines.
+
+    Uses the same full trade list as compute_daily_pnl_calendar().
+    """
+    tz = resolve_timezone(tz_name or _TRADING_TZ_NAME)
+    effective_tz_name = tz_name or _TRADING_TZ_NAME
+    now = datetime.now(tz)
+    now_ms = int(now.timestamp() * 1000)
+
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    days_since_sunday = (now.weekday() + 1) % 7
+    week_start = today_start - timedelta(days=days_since_sunday)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    ms_1d = 24 * 3600 * 1000
+    ms_1w = 7 * ms_1d
+    ms_1m = 30 * ms_1d
+    ms_1y = 365 * ms_1d
+
+    sums: Dict[str, float] = {
+        "1D_calendar": 0.0, "1D_trailing": 0.0,
+        "1W_calendar": 0.0, "1W_trailing": 0.0,
+        "1M_calendar": 0.0, "1M_trailing": 0.0,
+        "1Y_calendar": 0.0, "1Y_trailing": 0.0,
+        "ALL_calendar": 0.0,
+    }
+
+    for _trade, pnl, ts_ms, dt in _iter_realized_trades(effective_tz_name):
+        sums["ALL_calendar"] = round(sums["ALL_calendar"] + pnl, 4)
+        if dt >= today_start:
+            sums["1D_calendar"] = round(sums["1D_calendar"] + pnl, 4)
+        if ts_ms >= now_ms - ms_1d:
+            sums["1D_trailing"] = round(sums["1D_trailing"] + pnl, 4)
+        if dt >= week_start:
+            sums["1W_calendar"] = round(sums["1W_calendar"] + pnl, 4)
+        if ts_ms >= now_ms - ms_1w:
+            sums["1W_trailing"] = round(sums["1W_trailing"] + pnl, 4)
+        if dt >= month_start:
+            sums["1M_calendar"] = round(sums["1M_calendar"] + pnl, 4)
+        if ts_ms >= now_ms - ms_1m:
+            sums["1M_trailing"] = round(sums["1M_trailing"] + pnl, 4)
+        if dt >= year_start:
+            sums["1Y_calendar"] = round(sums["1Y_calendar"] + pnl, 4)
+        if ts_ms >= now_ms - ms_1y:
+            sums["1Y_trailing"] = round(sums["1Y_trailing"] + pnl, 4)
+
+    def _pair(prefix: str, trailing: bool = True) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "calendar": round(sums[f"{prefix}_calendar"], 2),
+        }
+        if trailing:
+            out["trailing"] = round(sums[f"{prefix}_trailing"], 2)
+        return out
+
+    return {
+        "timezone": effective_tz_name,
+        "periods": {
+            "1D":  _pair("1D"),
+            "1W":  _pair("1W"),
+            "1M":  _pair("1M"),
+            "1Y":  _pair("1Y"),
+            "ALL": _pair("ALL", trailing=False),
+        },
     }
 
 
@@ -2695,8 +2820,8 @@ class MarketWorker:
             return
         existing = redis_get_json(self._redis_trades_key()) or []
         existing.append(entry)
-        if len(existing) > 500:
-            existing = existing[-500:]
+        if len(existing) > REDIS_TRADES_MAX:
+            existing = existing[-REDIS_TRADES_MAX:]
         redis_set_json(self._redis_trades_key(), existing)
 
     # ═════════════════════════════════════════════════════════════════════
