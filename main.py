@@ -72,9 +72,11 @@ try:
         get_trade_history,
         trade_history_backfill,
         compute_biggest_realized_win,
+        compute_daily_pnl_calendar,
         find_worker,
         find_worker_by_asset,
         asset_cooldown,
+        TRADING_TZ,
     )
     _positions_available = True
 except ImportError:
@@ -92,6 +94,27 @@ except ImportError:
 
     def compute_biggest_realized_win() -> float:  # type: ignore
         return 0.0
+
+    def compute_daily_pnl_calendar(  # type: ignore
+        year: int, month: int, **kwargs: Any,
+    ) -> dict:
+        return {
+            "year": year,
+            "month": month,
+            "timezone": "UTC",
+            "week_start": 0,
+            "scale_max": 100.0,
+            "month_summary": {
+                "total_pnl": 0.0,
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+            },
+            "days": {},
+        }
+
+    TRADING_TZ = None  # type: ignore
 
     def find_worker(workers, asset, window):  # type: ignore
         return None
@@ -138,6 +161,11 @@ def _app_config_payload() -> dict:
 
 BOT_DISPLAY_NAME = _bot_name_from_url(os.getenv("RENDER_EXTERNAL_URL", ""))
 TRADING_ASSETS_SUBTITLE = trading_assets_label(" · ")
+
+CALENDAR_PNL_SCALE_MAX = max(float(os.getenv("CALENDAR_PNL_SCALE_MAX", "100")), 0.01)
+CALENDAR_WEEK_START = int(os.getenv("CALENDAR_WEEK_START", "0"))
+if CALENDAR_WEEK_START not in (0, 1):
+    CALENDAR_WEEK_START = 0
 
 
 app = FastAPI(title=f"{BOT_DISPLAY_NAME} Dashboard")
@@ -488,6 +516,37 @@ async def api_history(period: str = "1D"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /api/pnl/calendar  — daily realized PnL buckets for heatmap
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/pnl/calendar")
+async def api_pnl_calendar(
+    year: int | None = None,
+    month: int | None = None,
+    tz: str | None = None,
+    week_start: int | None = None,
+    scale_max: float | None = None,
+):
+    from datetime import datetime, timezone as _utc
+
+    cal_tz = TRADING_TZ if TRADING_TZ is not None else _utc.utc
+    now = datetime.now(cal_tz)
+    y = year if year is not None else now.year
+    m = month if month is not None else now.month
+    ws = week_start if week_start is not None else CALENDAR_WEEK_START
+    sm = scale_max if scale_max is not None else CALENDAR_PNL_SCALE_MAX
+
+    try:
+        data = compute_daily_pnl_calendar(
+            y, m, tz_name=tz, week_start=ws, scale_max=sm,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return JSONResponse(data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HTML DASHBOARD
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -695,6 +754,106 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       .pm-row-stats { align-items:flex-start; width:100%; flex-direction:row; justify-content:space-between; }
       .pm-cashout-btn { width:100%; text-align:center; margin-top:4px; }
     }
+
+    /* PnL calendar heatmap */
+    .cal-nav { display:flex; align-items:center; gap:10px; }
+    .cal-nav-btn {
+      background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.08);
+      color:#a1a1aa; width:32px; height:32px; border-radius:8px; cursor:pointer;
+      font-size:18px; line-height:1; display:flex; align-items:center; justify-content:center;
+      transition:background .15s,color .15s;
+    }
+    .cal-nav-btn:hover { background:rgba(255,255,255,0.1); color:#fafafa; }
+    .cal-month-label {
+      font-family:'Inter',system-ui,sans-serif; font-size:14px; font-weight:600;
+      color:#e4e4e7; min-width:140px; text-align:center;
+    }
+    .cal-summary {
+      display:flex; flex-wrap:wrap; align-items:baseline; gap:16px 24px;
+      padding:8px 20px 16px; border-bottom:1px solid rgba(255,255,255,0.06);
+    }
+    .cal-summary-pnl {
+      font-family:'Inter',system-ui,sans-serif; font-size:22px; font-weight:800;
+      letter-spacing:-.02em; font-variant-numeric:tabular-nums;
+    }
+    .cal-summary-pnl.pos { color:var(--accent-muted); }
+    .cal-summary-pnl.neg { color:#ef4444; }
+    .cal-summary-pnl.neu { color:#e4e4e7; }
+    .cal-summary-meta {
+      font-family:'JetBrains Mono','Consolas',monospace; font-size:12px;
+      color:#71717a; font-variant-numeric:tabular-nums;
+    }
+    .cal-scale-note { font-size:10px; color:#52525b; margin-left:auto; }
+    .cal-weekdays {
+      display:grid; grid-template-columns:repeat(7,1fr); gap:4px;
+      padding:0 20px 6px;
+    }
+    .cal-wday {
+      text-align:center; font-size:10px; font-weight:600; color:#52525b;
+      text-transform:uppercase; letter-spacing:.08em;
+    }
+    .cal-grid-wrap { padding:0 20px 20px; position:relative; }
+    .cal-grid {
+      display:grid; grid-template-columns:repeat(7,1fr); gap:4px;
+    }
+    .cal-cell {
+      min-height:68px; border-radius:10px; padding:8px 6px;
+      display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
+      gap:2px; border:1px solid transparent; cursor:default;
+      transition:border-color .12s;
+    }
+    .cal-cell--pad {
+      background:transparent; opacity:.35; pointer-events:none;
+    }
+    .cal-cell--empty {
+      background:rgba(113,113,122,0.06); border-color:rgba(255,255,255,0.03);
+    }
+    .cal-cell--future {
+      background:rgba(113,113,122,0.04); border-color:rgba(255,255,255,0.02);
+      opacity:.5;
+    }
+    .cal-cell--active { cursor:pointer; }
+    .cal-cell--active:hover { border-color:rgba(255,255,255,0.15); }
+    .cal-day-num {
+      font-size:11px; font-weight:600; color:#71717a; line-height:1;
+    }
+    .cal-cell--active .cal-day-num { color:#a1a1aa; }
+    .cal-day-pnl {
+      font-family:'JetBrains Mono','Consolas',monospace; font-size:11px;
+      font-weight:700; line-height:1.2; font-variant-numeric:tabular-nums;
+      text-align:center; word-break:break-word;
+    }
+    .cal-day-pnl.pos { color:var(--accent-muted); }
+    .cal-day-pnl.neg { color:#ef4444; }
+    .cal-day-trades {
+      font-family:'JetBrains Mono','Consolas',monospace; font-size:9px;
+      color:#52525b; font-variant-numeric:tabular-nums;
+    }
+    .cal-tooltip {
+      position:fixed; z-index:100; pointer-events:none;
+      background:#27272a; border:1px solid rgba(255,255,255,0.1);
+      border-radius:10px; padding:10px 12px; min-width:160px;
+      box-shadow:0 8px 24px rgba(0,0,0,0.45);
+      font-size:12px; line-height:1.5;
+    }
+    .cal-tooltip.hidden { display:none; }
+    .cal-tooltip-title {
+      font-weight:700; color:#fafafa; margin-bottom:6px;
+      font-family:'Inter',system-ui,sans-serif;
+    }
+    .cal-tooltip-row {
+      display:flex; justify-content:space-between; gap:12px;
+      font-family:'JetBrains Mono','Consolas',monospace; font-size:11px;
+      color:#a1a1aa;
+    }
+    .cal-tooltip-row span:last-child { color:#e4e4e7; font-variant-numeric:tabular-nums; }
+    .cal-tooltip-row.pos span:last-child { color:var(--accent-muted); }
+    .cal-tooltip-row.neg span:last-child { color:#ef4444; }
+    @media (max-width:640px) {
+      .cal-cell { min-height:56px; padding:6px 4px; }
+      .cal-day-pnl { font-size:10px; }
+      .cal-scale-note { width:100%; margin-left:0; margin-top:4px; }
+    }
   </style>
 </head>
 
@@ -831,6 +990,31 @@ HTML_CONTENT = r"""<!DOCTYPE html>
         <span class="pm-stat-lbl">Win Rate</span>
       </div>
     </div>
+  </div>
+
+  <!-- ── PnL Calendar heatmap ─────────────────────────────────── -->
+  <div class="pm-card" id="pnl-calendar-card">
+    <div class="pm-card-hdr">
+      <div class="pm-label-grp">
+        <span class="pm-lbl-txt">PnL Calendar</span>
+      </div>
+      <div class="cal-nav">
+        <button type="button" class="cal-nav-btn" id="cal-prev" aria-label="Previous month">&#8249;</button>
+        <span class="cal-month-label" id="cal-month-label">—</span>
+        <button type="button" class="cal-nav-btn" id="cal-next" aria-label="Next month">&#8250;</button>
+      </div>
+    </div>
+    <div class="cal-summary">
+      <span class="cal-summary-pnl neu" id="cal-month-pnl">$0.00</span>
+      <span class="cal-summary-meta" id="cal-month-wr">Win rate —</span>
+      <span class="cal-summary-meta" id="cal-month-trades">0 trades</span>
+      <span class="cal-scale-note" id="cal-scale-note">Scale ±$100</span>
+    </div>
+    <div class="cal-weekdays" id="cal-weekdays"></div>
+    <div class="cal-grid-wrap">
+      <div class="cal-grid" id="cal-grid"></div>
+    </div>
+    <div id="cal-tooltip" class="cal-tooltip hidden" role="tooltip"></div>
   </div>
 
   <!-- ── Trades / Positions / History (Polymarket-style) ───────── -->
@@ -971,6 +1155,7 @@ function refreshBalanceSensitiveUI() {
   if (window._lastBots) renderBots(window._lastBots);
   if (window._lastTradeHistory) renderTradeHistory(window._lastTradeHistory);
   renderProfileStats(window._lastBots || [], window._lastGlobalStats || {});
+  if (window._calData) renderCalendar(window._calData);
 }
 
 function _updatePositionsTabCount(count) {
@@ -1915,6 +2100,260 @@ function renderCard(bot){
     </div>`;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// PNL CALENDAR HEATMAP
+// ═══════════════════════════════════════════════════════════════════
+
+let _calYear = null;
+let _calMonth = null;
+let _calData = null;
+let _calLoading = false;
+
+const _CAL_WEEKDAYS_SUN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const _CAL_WEEKDAYS_MON = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const _CAL_MONTHS = ['January','February','March','April','May','June',
+                     'July','August','September','October','November','December'];
+
+function _calDaysInMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
+function _calPadOffset(year, month, weekStart) {
+  const dow = new Date(year, month - 1, 1).getDay();
+  return weekStart === 1 ? (dow + 6) % 7 : dow;
+}
+
+function _calFmtSignedUsd(val) {
+  if (!_balanceVisible) return _maskUsd();
+  const n = Number(val) || 0;
+  const sign = n >= 0 ? '+' : '-';
+  return sign + '$' + _fmtMoney(Math.abs(n));
+}
+
+function _calCellBg(pnl, scaleMax) {
+  const sm = Math.max(Number(scaleMax) || 100, 0.01);
+  const t = Math.min(Math.abs(Number(pnl) || 0) / sm, 1);
+  if (pnl > 0) return 'rgba(34,197,94,' + (0.08 + t * 0.55).toFixed(3) + ')';
+  if (pnl < 0) return 'rgba(239,68,68,' + (0.08 + t * 0.55).toFixed(3) + ')';
+  return '';
+}
+
+function _calIsFutureDay(year, month, day) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const cell = new Date(year, month - 1, day);
+  return cell > today;
+}
+
+function _calDayKey(year, month, day) {
+  const m = String(month).padStart(2, '0');
+  const d = String(day).padStart(2, '0');
+  return year + '-' + m + '-' + d;
+}
+
+function _calShowTooltip(ev, dayKey, dayData, label) {
+  const tip = document.getElementById('cal-tooltip');
+  if (!tip) return;
+  const pnl = dayData ? Number(dayData.pnl) || 0 : 0;
+  const trades = dayData ? Number(dayData.trades) || 0 : 0;
+  const wins = dayData ? Number(dayData.wins) || 0 : 0;
+  const losses = dayData ? Number(dayData.losses) || 0 : 0;
+  const best = dayData && dayData.best_trade != null ? Number(dayData.best_trade) : null;
+  const worst = dayData && dayData.worst_trade != null ? Number(dayData.worst_trade) : null;
+  const pnlCls = pnl > 0 ? 'pos' : pnl < 0 ? 'neg' : '';
+
+  let html = '<div class="cal-tooltip-title">' + label + '</div>';
+  html += '<div class="cal-tooltip-row ' + pnlCls + '"><span>PnL</span><span>' + _calFmtSignedUsd(pnl) + '</span></div>';
+  html += '<div class="cal-tooltip-row"><span>Trades</span><span>' + trades + '</span></div>';
+  if (trades > 0) {
+    html += '<div class="cal-tooltip-row"><span>W / L</span><span>' + wins + ' / ' + losses + '</span></div>';
+    if (best != null) {
+      html += '<div class="cal-tooltip-row pos"><span>Best</span><span>' + _calFmtSignedUsd(best) + '</span></div>';
+    }
+    if (worst != null) {
+      html += '<div class="cal-tooltip-row neg"><span>Worst</span><span>' + _calFmtSignedUsd(worst) + '</span></div>';
+    }
+  }
+  tip.innerHTML = html;
+  tip.classList.remove('hidden');
+
+  const pad = 12;
+  const rect = tip.getBoundingClientRect();
+  let x = ev.clientX + pad;
+  let y = ev.clientY + pad;
+  if (x + rect.width > window.innerWidth - pad) x = ev.clientX - rect.width - pad;
+  if (y + rect.height > window.innerHeight - pad) y = ev.clientY - rect.height - pad;
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+}
+
+function _calHideTooltip() {
+  const tip = document.getElementById('cal-tooltip');
+  if (tip) tip.classList.add('hidden');
+}
+
+function renderCalendar(data) {
+  if (!data) return;
+  window._calData = data;
+  _calYear = data.year;
+  _calMonth = data.month;
+
+  const weekStart = data.week_start === 1 ? 1 : 0;
+  const labels = weekStart === 1 ? _CAL_WEEKDAYS_MON : _CAL_WEEKDAYS_SUN;
+  const wdaysEl = document.getElementById('cal-weekdays');
+  if (wdaysEl) {
+    wdaysEl.innerHTML = labels.map(function(l) {
+      return '<div class="cal-wday">' + l + '</div>';
+    }).join('');
+  }
+
+  const monthLabel = document.getElementById('cal-month-label');
+  if (monthLabel) {
+    monthLabel.textContent = _CAL_MONTHS[data.month - 1] + ' ' + data.year;
+  }
+
+  const summary = data.month_summary || {};
+  const totalPnl = Number(summary.total_pnl) || 0;
+  const pnlEl = document.getElementById('cal-month-pnl');
+  if (pnlEl) {
+    if (!_balanceVisible) {
+      pnlEl.textContent = _maskUsd();
+      pnlEl.className = 'cal-summary-pnl neu';
+    } else {
+      pnlEl.textContent = (totalPnl >= 0 ? '+' : '-') + '$' + _fmtMoney(Math.abs(totalPnl));
+      pnlEl.className = 'cal-summary-pnl ' + (totalPnl > 0 ? 'pos' : totalPnl < 0 ? 'neg' : 'neu');
+    }
+  }
+
+  const wrEl = document.getElementById('cal-month-wr');
+  if (wrEl) {
+    const wr = Number(summary.win_rate) || 0;
+    wrEl.textContent = summary.trades ? ('Win rate ' + wr.toFixed(1) + '%') : 'Win rate —';
+  }
+
+  const trEl = document.getElementById('cal-month-trades');
+  if (trEl) {
+    const n = Number(summary.trades) || 0;
+    trEl.textContent = n + ' trade' + (n === 1 ? '' : 's');
+  }
+
+  const scaleEl = document.getElementById('cal-scale-note');
+  if (scaleEl) {
+    const sm = Number(data.scale_max) || 100;
+    scaleEl.textContent = 'Scale \u00b1$' + _fmtMoney(sm);
+  }
+
+  const gridEl = document.getElementById('cal-grid');
+  if (!gridEl) return;
+
+  const daysInMonth = _calDaysInMonth(data.year, data.month);
+  const padStart = _calPadOffset(data.year, data.month, weekStart);
+  const daysMap = data.days || {};
+  const scaleMax = Number(data.scale_max) || 100;
+
+  const cells = [];
+
+  if (padStart > 0) {
+    const prevMonth = data.month === 1 ? 12 : data.month - 1;
+    const prevYear = data.month === 1 ? data.year - 1 : data.year;
+    const prevDays = _calDaysInMonth(prevYear, prevMonth);
+    for (let i = padStart - 1; i >= 0; i--) {
+      const d = prevDays - i;
+      cells.push({ pad: true, day: d });
+    }
+  }
+
+  for (let d = 1; d <= daysInMonth; d++) {
+    const key = _calDayKey(data.year, data.month, d);
+    cells.push({ pad: false, day: d, key: key, data: daysMap[key] || null });
+  }
+
+  const remainder = cells.length % 7;
+  if (remainder !== 0) {
+    for (let d = 1; d <= 7 - remainder; d++) {
+      cells.push({ pad: true, day: d });
+    }
+  }
+
+  gridEl.innerHTML = cells.map(function(cell) {
+    if (cell.pad) {
+      return '<div class="cal-cell cal-cell--pad"><span class="cal-day-num">' + cell.day + '</span></div>';
+    }
+
+    const dayData = cell.data;
+    const hasTrades = dayData && Number(dayData.trades) > 0;
+    const pnl = hasTrades ? Number(dayData.pnl) || 0 : 0;
+    const isFuture = _calIsFutureDay(data.year, data.month, cell.day);
+    let cls = 'cal-cell';
+    if (isFuture && !hasTrades) cls += ' cal-cell--future';
+    else if (hasTrades) cls += ' cal-cell--active';
+    else cls += ' cal-cell--empty';
+
+    const pnlCls = pnl > 0 ? 'pos' : pnl < 0 ? 'neg' : '';
+    const style = hasTrades ? (' style="background:' + _calCellBg(pnl, scaleMax) + '"') : '';
+    const pnlHtml = hasTrades
+      ? '<span class="cal-day-pnl ' + pnlCls + '">' + _calFmtSignedUsd(pnl) + '</span>'
+        + '<span class="cal-day-trades">' + dayData.trades + ' tr</span>'
+      : '';
+
+    return '<div class="' + cls + '" data-day-key="' + cell.key + '"' + style
+      + ' onmouseenter="window._calTip(event,\'' + cell.key + '\')"'
+      + ' onmousemove="window._calTip(event,\'' + cell.key + '\')"'
+      + ' onmouseleave="_calHideTooltip()">'
+      + '<span class="cal-day-num">' + cell.day + '</span>'
+      + pnlHtml
+      + '</div>';
+  }).join('');
+}
+
+window._calTip = function(ev, dayKey) {
+  if (!window._calData) return;
+  const dayData = (window._calData.days || {})[dayKey] || null;
+  const parts = dayKey.split('-');
+  const label = _CAL_MONTHS[parseInt(parts[1], 10) - 1] + ' ' + parseInt(parts[2], 10) + ', ' + parts[0];
+  _calShowTooltip(ev, dayKey, dayData, label);
+};
+
+async function loadCalendar(year, month) {
+  if (_calLoading) return;
+  _calLoading = true;
+  try {
+    const params = new URLSearchParams();
+    if (year != null) params.set('year', String(year));
+    if (month != null) params.set('month', String(month));
+    const res = await fetch('/api/pnl/calendar?' + params.toString());
+    if (!res.ok) throw new Error('calendar fetch failed');
+    const data = await res.json();
+    renderCalendar(data);
+  } catch (e) {
+    console.warn('PnL calendar load failed', e);
+    const gridEl = document.getElementById('cal-grid');
+    if (gridEl) gridEl.innerHTML = '<div class="pm-empty" style="grid-column:1/-1;">Could not load calendar</div>';
+  } finally {
+    _calLoading = false;
+  }
+}
+
+function _calNav(delta) {
+  if (_calYear == null || _calMonth == null) return;
+  let y = _calYear;
+  let m = _calMonth + delta;
+  if (m < 1) { m = 12; y -= 1; }
+  else if (m > 12) { m = 1; y += 1; }
+  loadCalendar(y, m);
+}
+
+function _initCalendar() {
+  const prev = document.getElementById('cal-prev');
+  const next = document.getElementById('cal-next');
+  if (prev) prev.addEventListener('click', function() { _calNav(-1); });
+  if (next) next.addEventListener('click', function() { _calNav(1); });
+  loadCalendar(null, null);
+  setInterval(function() {
+    if (_calYear != null && _calMonth != null) loadCalendar(_calYear, _calMonth);
+  }, 2 * 60 * 1000);
+}
+
 // Boot: init crosshair, then load history immediately from the backend.
 // The backend will return backfilled historical data so the chart shows
 // past performance right away — not an empty chart from today.
@@ -1923,6 +2362,7 @@ _loadTheme();
 _updateBalanceToggleUI();
 _initChartOverlay();
 loadHistory(_pnlPeriod);
+_initCalendar();
 </script>
 </body>
 </html>"""

@@ -1149,6 +1149,104 @@ def compute_biggest_realized_win() -> float:
     return best
 
 
+def compute_daily_pnl_calendar(
+    year: int,
+    month: int,
+    *,
+    tz_name: Optional[str] = None,
+    week_start: int = 0,
+    scale_max: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Bucket realized PnL by calendar day for one month.
+
+    Reads closed-trade records via _load_trades_for_asset (Redis/local PnL
+    history). Read-only — does not mutate Redis, files, or worker state.
+    """
+    if month < 1 or month > 12:
+        raise ValueError("month must be 1–12")
+    if week_start not in (0, 1):
+        raise ValueError("week_start must be 0 (Sunday) or 1 (Monday)")
+
+    tz = resolve_timezone(tz_name or _TRADING_TZ_NAME)
+    effective_tz_name = tz_name or _TRADING_TZ_NAME
+
+    if scale_max is None or scale_max <= 0:
+        scale_max = float(os.getenv("CALENDAR_PNL_SCALE_MAX", "100"))
+    scale_max = max(float(scale_max), 0.01)
+
+    buckets: Dict[str, Dict[str, Any]] = {}
+
+    def _bucket(day_key: str) -> Dict[str, Any]:
+        if day_key not in buckets:
+            buckets[day_key] = {
+                "pnl": 0.0,
+                "trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "best_trade": None,
+                "worst_trade": None,
+            }
+        return buckets[day_key]
+
+    for wc in WORKER_CONFIGS:
+        for trade in _load_trades_for_asset(wc.asset, wc.window):
+            pnl_raw = trade.get("pnl")
+            if pnl_raw is None or not _is_finite_number(pnl_raw):
+                continue
+            pnl = round(float(pnl_raw), 4)
+
+            ts_ms = _parse_ts(trade.get("timestamp", ""))
+            if ts_ms is None:
+                continue
+
+            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).astimezone(tz)
+            if dt.year != year or dt.month != month:
+                continue
+
+            day_key = dt.strftime("%Y-%m-%d")
+            b = _bucket(day_key)
+            b["pnl"] = round(b["pnl"] + pnl, 4)
+            b["trades"] += 1
+            if pnl > 0:
+                b["wins"] += 1
+            elif pnl < 0:
+                b["losses"] += 1
+
+            if b["best_trade"] is None or pnl > b["best_trade"]:
+                b["best_trade"] = pnl
+            if b["worst_trade"] is None or pnl < b["worst_trade"]:
+                b["worst_trade"] = pnl
+
+    total_pnl = 0.0
+    total_trades = 0
+    total_wins = 0
+    total_losses = 0
+    for b in buckets.values():
+        total_pnl = round(total_pnl + b["pnl"], 4)
+        total_trades += b["trades"]
+        total_wins += b["wins"]
+        total_losses += b["losses"]
+
+    win_rate = round((total_wins / total_trades) * 100, 1) if total_trades > 0 else 0.0
+
+    return {
+        "year": year,
+        "month": month,
+        "timezone": effective_tz_name,
+        "week_start": week_start,
+        "scale_max": round(scale_max, 2),
+        "month_summary": {
+            "total_pnl": round(total_pnl, 2),
+            "trades": total_trades,
+            "wins": total_wins,
+            "losses": total_losses,
+            "win_rate": win_rate,
+        },
+        "days": buckets,
+    }
+
+
 def _build_equity_curve(all_trades_by_asset: Dict[str, List[Dict]]) -> List[Dict]:
     """
     Given {asset: [trade, ...]}, build a time-sorted portfolio equity curve.
