@@ -794,40 +794,92 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     }
     .cal-grid-wrap { padding:0 20px 20px; position:relative; }
     .cal-grid {
-      display:grid; grid-template-columns:repeat(7,1fr); gap:4px;
+      display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:5px;
     }
     .cal-cell {
-      min-height:68px; border-radius:10px; padding:8px 6px;
-      display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
-      gap:2px; border:1px solid transparent; cursor:default;
-      transition:border-color .12s;
+      position:relative;
+      aspect-ratio:1;
+      min-height:52px;
+      border-radius:8px;
+      padding:7px 5px;
+      display:flex; flex-direction:column;
+      align-items:center; justify-content:center;
+      gap:3px;
+      border:1px solid rgba(255,255,255,0.04);
+      background:rgba(113,113,122,0.06);
+      cursor:default;
+      transition:border-color .15s, background .15s;
+      overflow:hidden;
     }
     .cal-cell--pad {
-      background:transparent; opacity:.35; pointer-events:none;
+      background:transparent;
+      border-color:transparent;
+      opacity:.28;
+      pointer-events:none;
     }
+    .cal-cell--pad .cal-day-num { color:#3f3f46; }
     .cal-cell--empty {
-      background:rgba(113,113,122,0.06); border-color:rgba(255,255,255,0.03);
+      background:rgba(113,113,122,0.05);
+      border-color:rgba(255,255,255,0.03);
     }
     .cal-cell--future {
-      background:rgba(113,113,122,0.04); border-color:rgba(255,255,255,0.02);
-      opacity:.5;
+      background:rgba(113,113,122,0.03);
+      border-color:rgba(255,255,255,0.02);
+      opacity:.45;
+    }
+    .cal-cell--pos {
+      background:color-mix(
+        in srgb,
+        var(--accent) calc(6% + var(--cal-i, 0) * 54%),
+        rgba(24,24,27,0.92)
+      );
+      border-color:color-mix(
+        in srgb,
+        var(--accent-border-soft) calc(18% + var(--cal-i, 0) * 82%),
+        transparent
+      );
+    }
+    .cal-cell--neg {
+      background:color-mix(
+        in srgb,
+        #ef4444 calc(6% + var(--cal-i, 0) * 54%),
+        rgba(24,24,27,0.92)
+      );
+      border-color:color-mix(
+        in srgb,
+        #ef4444 calc(14% + var(--cal-i, 0) * 46%),
+        transparent
+      );
     }
     .cal-cell--active { cursor:pointer; }
-    .cal-cell--active:hover { border-color:rgba(255,255,255,0.15); }
+    .cal-cell--active:hover {
+      border-color:rgba(255,255,255,0.18);
+      box-shadow:0 0 0 1px rgba(255,255,255,0.04);
+    }
     .cal-day-num {
-      font-size:11px; font-weight:600; color:#71717a; line-height:1;
+      font-size:10px; font-weight:600; color:#52525b; line-height:1;
+      font-variant-numeric:tabular-nums;
     }
-    .cal-cell--active .cal-day-num { color:#a1a1aa; }
+    .cal-cell--empty .cal-day-num,
+    .cal-cell--future .cal-day-num { color:#52525b; }
+    .cal-cell--pos .cal-day-num {
+      color:color-mix(in srgb, var(--accent-subtle) calc(40% + var(--cal-i, 0) * 60%), #71717a);
+    }
+    .cal-cell--neg .cal-day-num {
+      color:color-mix(in srgb, #ef4444 calc(30% + var(--cal-i, 0) * 50%), #71717a);
+    }
     .cal-day-pnl {
-      font-family:'JetBrains Mono','Consolas',monospace; font-size:11px;
-      font-weight:700; line-height:1.2; font-variant-numeric:tabular-nums;
-      text-align:center; word-break:break-word;
+      font-family:'JetBrains Mono','Consolas',monospace;
+      font-size:10px; font-weight:700; line-height:1.15;
+      font-variant-numeric:tabular-nums;
+      text-align:center; max-width:100%;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
     }
-    .cal-day-pnl.pos { color:var(--accent-muted); }
-    .cal-day-pnl.neg { color:#ef4444; }
-    .cal-day-trades {
-      font-family:'JetBrains Mono','Consolas',monospace; font-size:9px;
-      color:#52525b; font-variant-numeric:tabular-nums;
+    .cal-cell--pos .cal-day-pnl {
+      color:color-mix(in srgb, var(--accent-muted) calc(55% + var(--cal-i, 0) * 45%), #e4e4e7);
+    }
+    .cal-cell--neg .cal-day-pnl {
+      color:color-mix(in srgb, #ef4444 calc(55% + var(--cal-i, 0) * 45%), #fca5a5);
     }
     .cal-tooltip {
       position:fixed; z-index:100; pointer-events:none;
@@ -851,8 +903,9 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     .cal-tooltip-row.neg span:last-child { color:#ef4444; }
     .pm-calendar-panel { padding:0; min-height:200px; }
     @media (max-width:640px) {
-      .cal-cell { min-height:56px; padding:6px 4px; }
-      .cal-day-pnl { font-size:10px; }
+      .cal-cell { min-height:44px; padding:5px 3px; gap:2px; }
+      .cal-day-pnl { font-size:9px; }
+      .cal-day-num { font-size:9px; }
       .cal-scale-note { width:100%; margin-left:0; margin-top:4px; }
     }
   </style>
@@ -2134,12 +2187,14 @@ function _calFmtSignedUsd(val) {
   return sign + '$' + _fmtMoney(Math.abs(n));
 }
 
-function _calCellBg(pnl, scaleMax) {
+function _calIntensity(pnl, scaleMax) {
   const sm = Math.max(Number(scaleMax) || 100, 0.01);
-  const t = Math.min(Math.abs(Number(pnl) || 0) / sm, 1);
-  if (pnl > 0) return 'rgba(34,197,94,' + (0.08 + t * 0.55).toFixed(3) + ')';
-  if (pnl < 0) return 'rgba(239,68,68,' + (0.08 + t * 0.55).toFixed(3) + ')';
-  return '';
+  return Math.min(Math.abs(Number(pnl) || 0) / sm, 1);
+}
+
+function _calCellStyle(pnl, scaleMax) {
+  if (!pnl) return '';
+  return '--cal-i:' + _calIntensity(pnl, scaleMax).toFixed(3) + ';';
 }
 
 function _calIsFutureDay(year, month, day) {
@@ -2290,14 +2345,12 @@ function renderCalendar(data) {
     const isFuture = _calIsFutureDay(data.year, data.month, cell.day);
     let cls = 'cal-cell';
     if (isFuture && !hasTrades) cls += ' cal-cell--future';
-    else if (hasTrades) cls += ' cal-cell--active';
+    else if (hasTrades) cls += ' cal-cell--active cal-cell--' + (pnl >= 0 ? 'pos' : 'neg');
     else cls += ' cal-cell--empty';
 
-    const pnlCls = pnl > 0 ? 'pos' : pnl < 0 ? 'neg' : '';
-    const style = hasTrades ? (' style="background:' + _calCellBg(pnl, scaleMax) + '"') : '';
+    const style = hasTrades ? (' style="' + _calCellStyle(pnl, scaleMax) + '"') : '';
     const pnlHtml = hasTrades
-      ? '<span class="cal-day-pnl ' + pnlCls + '">' + _calFmtSignedUsd(pnl) + '</span>'
-        + '<span class="cal-day-trades">' + dayData.trades + ' tr</span>'
+      ? '<span class="cal-day-pnl">' + _calFmtSignedUsd(pnl) + '</span>'
       : '';
 
     return '<div class="' + cls + '" data-day-key="' + cell.key + '"' + style
