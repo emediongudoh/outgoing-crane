@@ -73,7 +73,6 @@ try:
         trade_history_backfill,
         compute_biggest_realized_win,
         compute_daily_pnl_calendar,
-        compute_pnl_periods,
         find_worker,
         find_worker_by_asset,
         asset_cooldown,
@@ -113,18 +112,6 @@ except ImportError:
                 "win_rate": 0.0,
             },
             "days": {},
-        }
-
-    def compute_pnl_periods(**kwargs: Any) -> dict:  # type: ignore
-        return {
-            "timezone": "UTC",
-            "periods": {
-                "1D": {"calendar": 0.0, "trailing": 0.0},
-                "1W": {"calendar": 0.0, "trailing": 0.0},
-                "1M": {"calendar": 0.0, "trailing": 0.0},
-                "1Y": {"calendar": 0.0, "trailing": 0.0},
-                "ALL": {"calendar": 0.0},
-            },
         }
 
     TRADING_TZ = None  # type: ignore
@@ -559,12 +546,6 @@ async def api_pnl_calendar(
     return JSONResponse(data)
 
 
-@app.get("/api/pnl/periods")
-async def api_pnl_periods(tz: str | None = None):
-    """Calendar-aligned and trailing-window PnL sums for chart headline numbers."""
-    return JSONResponse(compute_pnl_periods(tz_name=tz))
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # HTML DASHBOARD
 # ─────────────────────────────────────────────────────────────────────────────
@@ -833,12 +814,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     }
     .cal-cell--active { cursor:pointer; }
     .cal-cell--active:hover { border-color:rgba(255,255,255,0.15); }
-    .cal-cell--active .cal-day-wday { color:#a1a1aa; }
-    .cal-day-wday {
-      font-size:10px; font-weight:600; color:#52525b; line-height:1;
-      text-transform:uppercase; letter-spacing:.04em;
+    .cal-day-num {
+      font-size:11px; font-weight:600; color:#71717a; line-height:1;
     }
-    .cal-cell--empty .cal-day-wday { color:#52525b; }
+    .cal-cell--active .cal-day-num { color:#a1a1aa; }
     .cal-day-pnl {
       font-family:'JetBrains Mono','Consolas',monospace; font-size:11px;
       font-weight:700; line-height:1.2; font-variant-numeric:tabular-nums;
@@ -846,6 +825,10 @@ HTML_CONTENT = r"""<!DOCTYPE html>
     }
     .cal-day-pnl.pos { color:var(--accent-muted); }
     .cal-day-pnl.neg { color:#ef4444; }
+    .cal-day-trades {
+      font-family:'JetBrains Mono','Consolas',monospace; font-size:9px;
+      color:#52525b; font-variant-numeric:tabular-nums;
+    }
     .cal-tooltip {
       position:fixed; z-index:100; pointer-events:none;
       background:#27272a; border:1px solid rgba(255,255,255,0.1);
@@ -1079,7 +1062,6 @@ let _profileStats = { positionsValue: 0, biggestWin: 0, predictions: 0 };
 let _historyPts    = [];
 let _livePts       = [];
 let _pnlPeriod     = '1D';
-let _pnlPeriods    = null;
 let _historyLoaded = false;
 let _loadingHist   = false;
 let _lastLivePnl   = null;
@@ -1137,78 +1119,6 @@ function _fmtMoney(abs) {
 function _displayBigVal(val) {
   if (!_balanceVisible) return _maskUsd();
   return (val >= 0 ? '' : '-') + '$' + _fmtMoney(Math.abs(val));
-}
-
-function _displaySignedPnl(val) {
-  if (!_balanceVisible) return _maskUsd();
-  const n = Number(val) || 0;
-  const sign = n >= 0 ? '+' : '-';
-  return sign + '$' + _fmtMoney(Math.abs(n));
-}
-
-const _TRAILING_LABELS = {
-  '1D': 'Past 24h', '1W': 'Past 7 days', '1M': 'Past 30 days',
-  '1Y': 'Past 365 days', 'ALL': '',
-};
-
-function _getPeriodHeadlines() {
-  const p = _pnlPeriods && _pnlPeriods.periods && _pnlPeriods.periods[_pnlPeriod];
-  if (p) {
-    return {
-      calendar: Number(p.calendar) || 0,
-      trailing: p.trailing != null ? Number(p.trailing) : null,
-    };
-  }
-  const basePts = _mergedPts();
-  const endVal  = basePts.length > 0 ? basePts[basePts.length - 1].v : (_lastLivePnl || 0);
-  const startVal = basePts.length > 0 ? basePts[0].v : endVal;
-  return { calendar: endVal, trailing: endVal - startVal };
-}
-
-function _applyPeriodHeadlines() {
-  const { calendar, trailing } = _getPeriodHeadlines();
-
-  const bigEl = document.getElementById('pm-bigval');
-  if (bigEl) {
-    bigEl.textContent = _displaySignedPnl(calendar);
-    bigEl.className   = 'pm-big-val ' + (!_balanceVisible ? 'neu'
-      : (calendar > 0 ? 'pos' : calendar < 0 ? 'neg' : 'neu'));
-  }
-
-  const triEl = document.getElementById('pm-tri');
-  if (triEl) {
-    triEl.textContent = calendar >= 0 ? '▲' : '▼';
-    triEl.className   = 'pm-tri ' + (calendar >= 0 ? 'pos' : 'neg');
-  }
-
-  const chEl = document.getElementById('pm-change-lbl');
-  if (chEl) {
-    if (_pnlPeriod === 'ALL' || trailing == null) {
-      chEl.textContent = _pnlPeriods ? '' : (_historyLoaded ? '' : 'Loading…');
-      chEl.className   = 'pm-change-lbl';
-    } else if (_pnlPeriods) {
-      const arrow = trailing >= 0 ? '▲' : '▼';
-      chEl.textContent = _displaySignedPnl(trailing) + '  ' + arrow + '  '
-        + (_TRAILING_LABELS[_pnlPeriod] || '');
-      chEl.className   = 'pm-change-lbl ' + (trailing >= 0 ? 'pos' : 'neg');
-    } else {
-      chEl.textContent = 'Loading…';
-      chEl.className   = 'pm-change-lbl';
-    }
-  }
-
-  return { calendar, trailing };
-}
-
-async function loadPnlPeriods() {
-  try {
-    const res = await fetch('/api/pnl/periods');
-    if (!res.ok) return;
-    _pnlPeriods = await res.json();
-    schedulePnlChartUpdate(true);
-  } catch (e) {
-    console.warn('PnL periods load failed', e);
-  }
 }
 
 function _displayPeriodChange(change, pct, arrow, periodLabel) {
@@ -1395,7 +1305,39 @@ function updatePnlChart() {
   const pts = _chartRenderPts(basePts);
   const { tMin, tMax, span } = _chartTimeDomain(pts);
 
-  const { calendar } = _applyPeriodHeadlines();
+  const totalPnl       = basePts.length > 0 ? basePts[basePts.length - 1].v : (_lastLivePnl || 0);
+  const periodStartVal = basePts.length > 0 ? basePts[0].v : totalPnl;
+  const periodEndVal   = totalPnl;
+  const periodChange   = periodEndVal - periodStartVal;
+  const periodChangePct = periodStartVal !== 0
+    ? (periodChange / Math.abs(periodStartVal)) * 100
+    : null;
+
+  const bigEl = document.getElementById('pm-bigval');
+  if (bigEl) {
+    bigEl.textContent = _displayBigVal(totalPnl);
+    bigEl.className   = 'pm-big-val ' + (!_balanceVisible ? 'neu'
+      : (totalPnl > 0 ? 'pos' : totalPnl < 0 ? 'neg' : 'neu'));
+  }
+
+  const triEl = document.getElementById('pm-tri');
+  if (triEl) {
+    triEl.textContent = periodChange >= 0 ? '▲' : '▼';
+    triEl.className   = 'pm-tri ' + (periodChange >= 0 ? 'pos' : 'neg');
+  }
+
+  const chEl = document.getElementById('pm-change-lbl');
+  if (chEl) {
+    if (basePts.length > 1) {
+      const arrow = periodChange >= 0 ? '▲' : '▼';
+      chEl.textContent = _displayPeriodChange(
+        periodChange, periodChangePct, arrow, _periodLabel(_pnlPeriod, tMin, tMax));
+      chEl.className   = 'pm-change-lbl ' + (periodChange >= 0 ? 'pos' : 'neg');
+    } else {
+      chEl.textContent = _historyLoaded ? _periodLabel(_pnlPeriod, tMin, tMax) : 'Loading…';
+      chEl.className   = 'pm-change-lbl';
+    }
+  }
 
   const chartEl = document.getElementById('pm-chart-box');
   if (!chartEl) return;
@@ -1425,8 +1367,8 @@ function updatePnlChart() {
   const mx = t => _xForTime(t, tMin, span, PX, drawW).toFixed(2);
   const my = v  => (PY + drawH - ((v - lo) / vRange * drawH)).toFixed(2);
 
-  const lineColor  = calendar >= 0 ? _accentColor() : '#ef4444';
-  const lineColor2 = calendar >= 0 ? _accentDark() : '#dc2626';
+  const lineColor  = periodChange >= 0 ? _accentColor() : '#ef4444';
+  const lineColor2 = periodChange >= 0 ? _accentDark() : '#dc2626';
 
   const dLine = pts.map((p, i) => `${i===0?'M':'L'}${mx(p.t)},${my(p.v)}`).join(' ');
   const zeroY = parseFloat(my(0));
@@ -1461,17 +1403,14 @@ function updatePnlChart() {
 
   const lastY = parseFloat(my(pts[pts.length - 1].v));
 
-  const headlines = _getPeriodHeadlines();
   window._pmChart = {
     pts, PX, PY, drawW, drawH, W, H,
     tMin, tMax, span,
     period: _pnlPeriod, lo, vRange, lineColor,
-    origCalendar: headlines.calendar,
-    origTrailing: headlines.trailing,
-    origChangeTxt: document.getElementById('pm-change-lbl')
-      ? document.getElementById('pm-change-lbl').textContent : '',
-    origChangeCls: document.getElementById('pm-change-lbl')
-      ? document.getElementById('pm-change-lbl').className : '',
+    origVal: totalPnl,
+    origPeriodChange: periodChange,
+    origChangeTxt: chEl ? chEl.textContent : '',
+    origChangeCls: chEl ? chEl.className   : '',
   };
 
   const ndEl = chartEl.querySelector('#pm-no-data');
@@ -1570,14 +1509,14 @@ function _initChartOverlay() {
     if (!c) return;
     const bigEl = document.getElementById('pm-bigval');
     if (bigEl) {
-      bigEl.textContent = _displaySignedPnl(c.origCalendar);
+      bigEl.textContent = _displayBigVal(c.origVal);
       bigEl.className   = 'pm-big-val ' + (!_balanceVisible ? 'neu'
-        : (c.origCalendar > 0 ? 'pos' : c.origCalendar < 0 ? 'neg' : 'neu'));
+        : (c.origVal > 0 ? 'pos' : c.origVal < 0 ? 'neg' : 'neu'));
     }
     const triEl = document.getElementById('pm-tri');
     if (triEl) {
-      triEl.textContent = c.origCalendar >= 0 ? '▲' : '▼';
-      triEl.className   = 'pm-tri ' + (c.origCalendar >= 0 ? 'pos' : 'neg');
+      triEl.textContent = c.origPeriodChange>=0?'▲':'▼';
+      triEl.className   = 'pm-tri '+(c.origPeriodChange>=0?'pos':'neg');
     }
     const chEl = document.getElementById('pm-change-lbl');
     if (chEl && c.origChangeTxt) { chEl.textContent=c.origChangeTxt; chEl.className=c.origChangeCls; }
@@ -1592,7 +1531,6 @@ function _initChartOverlay() {
 
 // Refresh history from backend every 2 minutes to pick up any new Redis flushes.
 setInterval(() => loadHistory(_pnlPeriod), 2 * 60 * 1000);
-setInterval(() => loadPnlPeriods(), 2 * 60 * 1000);
 setInterval(() => {
   if (_lastLivePnl != null) {
     _lastLiveTs = Date.now();
@@ -1636,7 +1574,6 @@ function connect() {
     setTimeout(connect, 2500);
   };
   ws.onerror = () => ws.close();
-let _lastPeriodsFetch = 0;
   ws.onmessage = e => {
     const d = JSON.parse(e.data);
     window._lastBots = d.bots || [];
@@ -1649,11 +1586,6 @@ let _lastPeriodsFetch = 0;
     renderPositions(d.positions || []);
     renderTradeHistory(window._lastTradeHistory);
     if (d.config) renderAppConfig(d.config);
-    const now = Date.now();
-    if (now - _lastPeriodsFetch > 30000) {
-      _lastPeriodsFetch = now;
-      loadPnlPeriods();
-    }
   };
 }
 function renderAppConfig(cfg) {
@@ -2223,12 +2155,6 @@ function _calDayKey(year, month, day) {
   return year + '-' + m + '-' + d;
 }
 
-function _calWeekdayFromKey(dayKey) {
-  const parts = dayKey.split('-');
-  const dt = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
-  return _CAL_WEEKDAYS_SUN[dt.getDay()];
-}
-
 function _calShowTooltip(ev, dayKey, dayData, label) {
   const tip = document.getElementById('cal-tooltip');
   if (!tip) return;
@@ -2355,14 +2281,13 @@ function renderCalendar(data) {
 
   gridEl.innerHTML = cells.map(function(cell) {
     if (cell.pad) {
-      return '<div class="cal-cell cal-cell--pad"></div>';
+      return '<div class="cal-cell cal-cell--pad"><span class="cal-day-num">' + cell.day + '</span></div>';
     }
 
     const dayData = cell.data;
     const hasTrades = dayData && Number(dayData.trades) > 0;
     const pnl = hasTrades ? Number(dayData.pnl) || 0 : 0;
     const isFuture = _calIsFutureDay(data.year, data.month, cell.day);
-    const weekday = _calWeekdayFromKey(cell.key);
     let cls = 'cal-cell';
     if (isFuture && !hasTrades) cls += ' cal-cell--future';
     else if (hasTrades) cls += ' cal-cell--active';
@@ -2372,13 +2297,14 @@ function renderCalendar(data) {
     const style = hasTrades ? (' style="background:' + _calCellBg(pnl, scaleMax) + '"') : '';
     const pnlHtml = hasTrades
       ? '<span class="cal-day-pnl ' + pnlCls + '">' + _calFmtSignedUsd(pnl) + '</span>'
+        + '<span class="cal-day-trades">' + dayData.trades + ' tr</span>'
       : '';
 
     return '<div class="' + cls + '" data-day-key="' + cell.key + '"' + style
       + ' onmouseenter="window._calTip(event,\'' + cell.key + '\')"'
       + ' onmousemove="window._calTip(event,\'' + cell.key + '\')"'
       + ' onmouseleave="_calHideTooltip()">'
-      + '<span class="cal-day-wday">' + weekday + '</span>'
+      + '<span class="cal-day-num">' + cell.day + '</span>'
       + pnlHtml
       + '</div>';
   }).join('');
@@ -2441,7 +2367,6 @@ _loadTheme();
 _updateBalanceToggleUI();
 _initChartOverlay();
 loadHistory(_pnlPeriod);
-loadPnlPeriods();
 _initCalendar();
 </script>
 </body>
