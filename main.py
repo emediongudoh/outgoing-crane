@@ -908,6 +908,47 @@ HTML_CONTENT = r"""<!DOCTYPE html>
       .cal-day-num { font-size:9px; }
       .cal-scale-note { width:100%; margin-left:0; margin-top:4px; }
     }
+
+    /* Mobile bottom navigation — desktop keeps top tabs */
+    .pm-bottom-nav { display:none; }
+    @media (max-width:768px) {
+      .pm-section-tabs { display:none; }
+      .pm-bottom-nav {
+        display:flex;
+        position:fixed;
+        left:0; right:0; bottom:0;
+        z-index:50;
+        justify-content:space-around;
+        align-items:stretch;
+        background:#18181b;
+        border-top:1px solid rgba(255,255,255,0.08);
+        padding:6px 0 calc(6px + env(safe-area-inset-bottom, 0px));
+        box-shadow:0 -4px 24px rgba(0,0,0,0.35);
+      }
+      .pm-bottom-nav-item {
+        flex:1;
+        display:flex;
+        flex-direction:column;
+        align-items:center;
+        justify-content:center;
+        gap:3px;
+        background:none;
+        border:none;
+        color:#71717a;
+        font-family:'Inter',system-ui,sans-serif;
+        font-size:10px;
+        font-weight:600;
+        padding:6px 4px;
+        cursor:pointer;
+        transition:color .15s;
+        min-height:52px;
+      }
+      .pm-bottom-nav-item i { font-size:18px; line-height:1; }
+      .pm-bottom-nav-item:hover { color:#a1a1aa; }
+      .pm-bottom-nav-item.act { color:var(--accent); }
+      .pm-bottom-nav-item.act i { color:var(--accent); }
+      body { padding-bottom:calc(72px + env(safe-area-inset-bottom, 0px)) !important; }
+    }
   </style>
 </head>
 
@@ -1090,6 +1131,26 @@ HTML_CONTENT = r"""<!DOCTYPE html>
 
 </div>
 
+<!-- Mobile bottom nav (hidden on desktop via CSS) -->
+<nav class="pm-bottom-nav" id="pm-bottom-nav" aria-label="Portfolio navigation">
+  <button type="button" class="pm-bottom-nav-item act" id="bottom-tab-trades" onclick="setPortfolioTab('trades')">
+    <i class="fa-solid fa-chart-line" aria-hidden="true"></i>
+    <span>Trades</span>
+  </button>
+  <button type="button" class="pm-bottom-nav-item" id="bottom-tab-positions" onclick="setPortfolioTab('positions')">
+    <i class="fa-solid fa-briefcase" aria-hidden="true"></i>
+    <span>Positions</span>
+  </button>
+  <button type="button" class="pm-bottom-nav-item" id="bottom-tab-history" onclick="setPortfolioTab('history')">
+    <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i>
+    <span>History</span>
+  </button>
+  <button type="button" class="pm-bottom-nav-item" id="bottom-tab-calendar" onclick="setPortfolioTab('calendar')">
+    <i class="fa-solid fa-calendar-days" aria-hidden="true"></i>
+    <span>Calendar</span>
+  </button>
+</nav>
+
 <script>
 // ═══════════════════════════════════════════════════════════════════
 // PORTFOLIO HISTORY CHART ENGINE
@@ -1212,8 +1273,14 @@ function refreshBalanceSensitiveUI() {
 }
 
 function _updatePositionsTabCount(count) {
+  const n = count || 0;
   const btn = document.getElementById('tab-btn-positions');
-  if (btn) btn.textContent = 'Positions (' + (count || 0) + ')';
+  if (btn) btn.textContent = 'Positions (' + n + ')';
+  const bottomBtn = document.getElementById('bottom-tab-positions');
+  if (bottomBtn) {
+    const label = bottomBtn.querySelector('span');
+    if (label) label.textContent = n > 0 ? ('Positions (' + n + ')') : 'Positions';
+  }
 }
 
 function _periodLabel(p, tMin, tMax) {
@@ -1674,8 +1741,10 @@ function setPortfolioTab(tab) {
   _activePortfolioTab = tab;
   _PORTFOLIO_TABS.forEach(t => {
     const btn = document.getElementById('tab-btn-' + t);
+    const bottomBtn = document.getElementById('bottom-tab-' + t);
     const panel = document.getElementById('panel-' + t);
     if (btn) btn.classList.toggle('act', tab === t);
+    if (bottomBtn) bottomBtn.classList.toggle('act', tab === t);
     if (panel) panel.classList.toggle('hidden', tab !== t);
   });
   if (tab === 'calendar') {
@@ -1730,6 +1799,10 @@ function renderPositions(positions) {
     el.innerHTML = '<div class="pm-empty">No open positions</div>';
     return;
   }
+  if (window._positionsDebugOnce !== true) {
+    console.log('[positions] sample snapshot:', JSON.parse(JSON.stringify(window._lastPositions[0])));
+    window._positionsDebugOnce = true;
+  }
   el.innerHTML = window._lastPositions.map(p => {
     const roi = Number(p.roi_pct) || 0;
     const pnl = Number(p.unrealized_pnl) || 0;
@@ -1739,9 +1812,10 @@ function renderPositions(positions) {
     const disabled = pending || !p.cashout_available;
     const btnLabel = pending ? 'Selling…' : 'Sell';
     const sideCls = p.side === 'YES' ? 'pm-side-yes' : p.side === 'NO' ? 'pm-side-no' : 'pm-side-spread';
-    const isSpread = p.side === 'SPREAD';
+    const hasBothLegs = Number(p.yes_shares || 0) > 0 && Number(p.no_shares || 0) > 0;
+    const isSpread = p.side === 'SPREAD' || hasBothLegs;
     const entryDetail = isSpread
-      ? `<span>Y ${Number(p.yes_shares||0).toFixed(1)}@${_fmtCents(p.yes_avg_price_c)} avg · N ${Number(p.no_shares||0).toFixed(1)}@${_fmtCents(p.no_avg_price_c)} avg${p.pair_avg_price_c ? ' · pair '+_fmtCents(p.pair_avg_price_c)+' avg' : ''}</span>`
+      ? `<span>Y ${Number(p.yes_shares||0).toFixed(1)}@${_fmtCents(p.yes_avg_price_c)} → ${_fmtCents(p.yes_bid_c)} · N ${Number(p.no_shares||0).toFixed(1)}@${_fmtCents(p.no_avg_price_c)} → ${_fmtCents(p.no_bid_c)}${p.pair_avg_price_c ? ' · pair '+_fmtCents(p.pair_avg_price_c)+' avg' : ''}</span>`
       : `<span class="${sideCls}">${p.side}</span><span>${_fmtCents(p.entry_price_cents)} → ${_fmtCents(p.current_price_cents)}</span>`;
     return `
       <div class="pm-row" data-asset="${p.asset}" data-window="${p.window || '5m'}">

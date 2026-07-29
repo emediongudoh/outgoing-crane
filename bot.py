@@ -1064,7 +1064,7 @@ def _drop_isolated_spikes(points: List[Dict]) -> List[Dict]:
 
     return [p for p, k in zip(points, keep) if k]
 
-# Timestamp format written by log_pnl() via datetime.now().strftime(...)
+# Timestamp format written by log_pnl() via datetime.now(TRADING_TZ).strftime(...)
 _TS_PRIMARY = "%Y-%m-%d %H:%M:%S"
 
 # Additional formats found in older records or alternative paths.
@@ -1084,14 +1084,15 @@ def _parse_ts(ts_str: str) -> Optional[int]:
         try:
             dt = datetime.strptime(ts_str, fmt)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                # Naive strings from log_pnl() are written in TRADING_TZ.
+                dt = dt.replace(tzinfo=TRADING_TZ)
             return int(dt.timestamp() * 1000)
         except ValueError:
             continue
     try:
         dt = datetime.fromisoformat(ts_str)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=TRADING_TZ)
         return int(dt.timestamp() * 1000)
     except Exception:
         return None
@@ -1170,6 +1171,43 @@ def _load_redis_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
     return []
 
 
+def _load_worker_stats(asset: str, window: str = "5m") -> Dict[str, float]:
+    """Aggregate PnL counters for one worker (Redis stats key or local file header)."""
+    asset_l = asset.lower()
+    window_l = window.lower()
+    redis_key = f"emiliano:{asset_l}:{window_l}:stats"
+    if _redis_available:
+        data = redis_get_json(redis_key)
+        if not data:
+            data = redis_get_json(f"emiliano:{asset_l}:stats")
+        if data:
+            wins = int(data.get("wins", 0))
+            losses = int(data.get("losses", 0))
+            return {
+                "total_pnl": float(data.get("total_pnl", 0.0)),
+                "wins": wins,
+                "losses": losses,
+                "trades": wins + losses,
+            }
+
+    for fp in (asset_pnl_filename(asset_l, window_l), f"{asset_l}_pnl_history.json"):
+        try:
+            if os.path.exists(fp):
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                wins = int(data.get("wins", 0))
+                losses = int(data.get("losses", 0))
+                return {
+                    "total_pnl": float(data.get("total_pnl", 0.0)),
+                    "wins": wins,
+                    "losses": losses,
+                    "trades": wins + losses,
+                }
+        except Exception:
+            continue
+    return {"total_pnl": 0.0, "wins": 0, "losses": 0, "trades": 0}
+
+
 def _load_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
     """
     Return the fullest trade list for one worker.
@@ -1180,7 +1218,38 @@ def _load_trades_for_asset(asset: str, window: str = "5m") -> List[Dict]:
     """
     redis_trades = _load_redis_trades_for_asset(asset, window)
     local_trades = _load_local_trades_for_asset(asset, window)
-    return _merge_trade_lists(redis_trades, local_trades)
+    merged = _merge_trade_lists(redis_trades, local_trades)
+
+    redis_pnl = sum(
+        float(t.get("pnl", 0))
+        for t in redis_trades
+        if _is_finite_number(t.get("pnl"))
+    )
+    local_pnl = sum(
+        float(t.get("pnl", 0))
+        for t in local_trades
+        if _is_finite_number(t.get("pnl"))
+    )
+    merged_pnl = sum(
+        float(t.get("pnl", 0))
+        for t in merged
+        if _is_finite_number(t.get("pnl"))
+    )
+    stats = _load_worker_stats(asset, window)
+    print(
+        f"📊 [{asset.upper()} {window}] trades load — "
+        f"redis: {len(redis_trades)} (${redis_pnl:.2f}) | "
+        f"local: {len(local_trades)} (${local_pnl:.2f}) | "
+        f"merged: {len(merged)} (${merged_pnl:.2f}) | "
+        f"stats: {stats['trades']} (${stats['total_pnl']:.2f})"
+    )
+    if stats["trades"] > len(merged):
+        print(
+            f"⚠️ [{asset.upper()} {window}] trade list shorter than stats counter "
+            f"({len(merged)} records vs {stats['trades']} logged trades) — "
+            f"calendar totals may undercount until local history is restored."
+        )
+    return merged
 
 
 def _iter_realized_trades(
@@ -1285,6 +1354,39 @@ def compute_daily_pnl_calendar(
         total_losses += b["losses"]
 
     win_rate = round((total_wins / total_trades) * 100, 1) if total_trades > 0 else 0.0
+
+    stats_trades = 0
+    stats_pnl = 0.0
+    for wc in WORKER_CONFIGS:
+        ws = _load_worker_stats(wc.asset, wc.window)
+        stats_trades += ws["trades"]
+        stats_pnl = round(stats_pnl + ws["total_pnl"], 4)
+
+    # Log a sample Jul 25+ bucket when present (helps verify timezone bucketing).
+    for day_key in sorted(buckets.keys()):
+        if day_key >= "2026-07-25":
+            b = buckets[day_key]
+            print(
+                f"📅 [calendar] day {day_key}: "
+                f"{b['trades']} trades, pnl=${b['pnl']:.2f} (tz={effective_tz_name})"
+            )
+
+    if stats_trades > 0 and (
+        total_trades < stats_trades
+        or abs(total_pnl - stats_pnl) > max(0.05, abs(stats_pnl) * 0.01)
+    ):
+        print(
+            f"⚠️ [calendar] {year}-{month:02d} month_summary "
+            f"({total_trades} trades, ${total_pnl:.2f}) "
+            f"≠ portfolio stats ({stats_trades} trades, ${stats_pnl:.2f}) — "
+            f"trade records are incomplete or timestamps were mis-bucketed."
+        )
+    else:
+        print(
+            f"✅ [calendar] {year}-{month:02d} month_summary "
+            f"{total_trades} trades, ${total_pnl:.2f} "
+            f"(portfolio stats: {stats_trades} trades, ${stats_pnl:.2f})"
+        )
 
     return {
         "year": year,
@@ -3576,30 +3678,81 @@ class MarketWorker:
         total_cost = inv.yes_cost + inv.no_cost
         yes_avg_c = round(inv.avg_cost("YES") * 100, 1) if inv.yes_shares > 0 else 0.0
         no_avg_c = round(inv.avg_cost("NO") * 100, 1) if inv.no_shares > 0 else 0.0
+        yes_bid_c = round(self.bids.get("YES", 0.0) * 100, 1)
+        no_bid_c = round(self.bids.get("NO", 0.0) * 100, 1)
         pair_avg_c = (
             round((inv.avg_cost("YES") + inv.avg_cost("NO")) * 100, 1)
             if inv.matched_pairs > 0 else 0.0
         )
+        combined_bid_c = (
+            round((self.bids.get("YES", 0.0) + self.bids.get("NO", 0.0)) * 100, 1)
+            if yes_bid_c > 0 and no_bid_c > 0 else 0.0
+        )
+
+        # Display fields for Positions tab (entry → current market bid).
+        has_yes = inv.yes_shares > MIN_FILL_DELTA
+        has_no = inv.no_shares > MIN_FILL_DELTA
+        if has_yes and not has_no:
+            display_side = "YES"
+            entry_price_cents = yes_avg_c
+            current_price_cents = yes_bid_c
+            entry_price = round(inv.avg_cost("YES"), 4)
+            current_price = round(self.bids.get("YES", 0.0), 4)
+        elif has_no and not has_yes:
+            display_side = "NO"
+            entry_price_cents = no_avg_c
+            current_price_cents = no_bid_c
+            entry_price = round(inv.avg_cost("NO"), 4)
+            current_price = round(self.bids.get("NO", 0.0), 4)
+        elif inv.matched_pairs > 0:
+            display_side = "SPREAD"
+            entry_price_cents = pair_avg_c
+            current_price_cents = combined_bid_c
+            entry_price = round(inv.avg_cost("YES") + inv.avg_cost("NO"), 4)
+            current_price = round(
+                (self.bids.get("YES", 0.0) + self.bids.get("NO", 0.0)), 4,
+            )
+        elif has_yes and has_no:
+            if inv.yes_shares >= inv.no_shares:
+                display_side = "YES"
+                entry_price_cents = yes_avg_c
+                current_price_cents = yes_bid_c
+                entry_price = round(inv.avg_cost("YES"), 4)
+                current_price = round(self.bids.get("YES", 0.0), 4)
+            else:
+                display_side = "NO"
+                entry_price_cents = no_avg_c
+                current_price_cents = no_bid_c
+                entry_price = round(inv.avg_cost("NO"), 4)
+                current_price = round(self.bids.get("NO", 0.0), 4)
+        else:
+            display_side = "MOMENTUM"
+            entry_price_cents = 0.0
+            current_price_cents = 0.0
+            entry_price = 0.0
+            current_price = 0.0
+
         return {
             "id":                  f"{self.asset_type}:{self.window_slug}:{slug}:momentum",
             "asset":               self.asset_type.upper(),
             "window":              self.window_slug,
             "market":              market_name,
             "slug":                slug,
-            "side":                "MOMENTUM",
+            "side":                display_side,
             "strategy":            "momentum",
             "yes_shares":          round(inv.yes_shares, 4),
             "no_shares":           round(inv.no_shares, 4),
             "yes_avg_price_c":     yes_avg_c,
             "no_avg_price_c":      no_avg_c,
+            "yes_bid_c":           yes_bid_c,
+            "no_bid_c":            no_bid_c,
             "pair_avg_price_c":    pair_avg_c,
             "matched_pairs":       round(inv.matched_pairs, 4),
             "position_imbalance":  round(inv.imbalance, 4),
-            "entry_price":         round(inv.avg_cost("YES") + inv.avg_cost("NO"), 4)
-                                   if inv.matched_pairs > 0 else 0.0,
-            "current_price":       0.0,
-            "entry_price_cents":   pair_avg_c,
-            "current_price_cents": 100.0 if inv.matched_pairs > 0 else 0.0,
+            "entry_price":         entry_price,
+            "current_price":       current_price,
+            "entry_price_cents":   entry_price_cents,
+            "current_price_cents": current_price_cents,
             "roi_pct":             pnl_pct,
             "unrealized_pnl":      pnl_dollars,
             "size":                round(inv.yes_shares + inv.no_shares, 4),
@@ -3697,7 +3850,7 @@ class MarketWorker:
 
         duration = round(t.time() - (self.entry_timestamp or t.time()), 2)
         entry = {
-            "timestamp":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp":      datetime.now(TRADING_TZ).strftime(_TS_PRIMARY),
             "market":         market_question,
             "slug":           slug,
             "type":           outcome_type,
