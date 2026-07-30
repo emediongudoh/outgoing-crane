@@ -1,0 +1,2 @@
+2026-07-30 12:56:37 [MOMENTUM LIVE] NO trigger=0.9000 size=5.1 | NO=5.09@91c | inv Y=0.0 N=5.1
+2026-07-30 12:57:54 [MOMENTUM LIVE] NO trigger=0.9000 size=5.1 | NO=5.09@91c | inv Y=0.0 N=5.1

@@ -1,0 +1,2 @@
+2026-07-30 12:56:27,053 {"event": "order_submit", "ts": 1785412587.0531058, "action": "BUY", "side": "NO", "price": 0.91, "size": 5.1, "order_type": "GTC", "order_id": "0xae254ea9f295118edb5590e53f02a2d549b7eb9bc5ecb2ecb0c42d13e9d9baf2", "filled": false}
+2026-07-30 12:57:54,468 {"event": "order_submit", "ts": 1785412674.4688182, "action": "BUY", "side": "NO", "price": 0.91, "size": 5.1, "order_type": "GTC", "order_id": "0x59d93fb886277d81b459461528568d71acbf4ca080133711212dc2d16fe174d5", "filled": false}

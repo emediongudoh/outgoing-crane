@@ -1,6 +1,5 @@
 virtual_env/
 /__pycache__/
 *.pyc
-.env
 id_rsa_momentum
 id_rsa_momentum.pub

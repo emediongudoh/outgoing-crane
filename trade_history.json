@@ -11,5 +11,31 @@
     "price": 0.41,
     "size": 5.09,
     "window": "5m"
+  },
+  {
+    "id": "eth:eth-updown-5m-1785412500:buy:NO:1785412597210:0.91:5.09",
+    "timestamp": "2026-07-30 11:56:37",
+    "timestamp_ms": 1785412597210,
+    "asset": "ETH",
+    "market": "Ethereum Up or Down - July 30, 7:55AM-8:00AM ET",
+    "slug": "eth-updown-5m-1785412500",
+    "action": "buy",
+    "side": "NO",
+    "price": 0.91,
+    "size": 5.09,
+    "window": "5m"
+  },
+  {
+    "id": "btc:btc-updown-5m-1785412500:buy:NO:1785412674742:0.91:5.09",
+    "timestamp": "2026-07-30 11:57:54",
+    "timestamp_ms": 1785412674742,
+    "asset": "BTC",
+    "market": "Bitcoin Up or Down - July 30, 7:55AM-8:00AM ET",
+    "slug": "btc-updown-5m-1785412500",
+    "action": "buy",
+    "side": "NO",
+    "price": 0.91,
+    "size": 5.09,
+    "window": "5m"
   }
 ]

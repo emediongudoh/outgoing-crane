@@ -2571,5 +2571,5 @@ async def api_cashout_legacy(asset: str):
 
 
 if __name__ == "__main__":
-    _port = int(os.getenv("PORT", "8000"))
+    _port = int(os.getenv("PORT", "7000"))
     uvicorn.run("main:app", host="0.0.0.0", port=_port, log_level="info")
