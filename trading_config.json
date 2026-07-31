@@ -11,7 +11,7 @@
     "dry_run_fill_delay_max_ms": 2500,
     "listener_activate_secs": null,
     "entry_seconds_left": null,
-    "min_entry_seconds_left": 10,
+    "min_entry_seconds_left": 45,
     "fill_timeout_ms": 10000,
     "fill_poll_ms": 400
   },
